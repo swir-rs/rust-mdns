@@ -11,18 +11,24 @@ extern crate net2;
 extern crate nix;
 extern crate rand;
 
+
+
 use dns_parser::Name;
-use futures::{Future};
 
 
-use futures::channel::mpsc;
-use std::cell::RefCell;
+
 use std::io;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use tokio::sync::{RwLock,mpsc};
+use crate::futures::StreamExt;
+use tokio::time;
+use std::time::Duration;
+use std::net::SocketAddr;
 
 
 mod address_family;
 mod fsm;
+mod record;
 #[cfg(windows)]
 #[path = "netwin.rs"]
 mod net;
@@ -34,20 +40,26 @@ use address_family::{Inet, Inet6};
 use fsm::{Command, FSM};
 use services::{ServiceData, Services, ServicesInner};
 
+
 const DEFAULT_TTL: u32 = 60;
 const MDNS_PORT: u16 = 5353;
 
+#[allow(non_snake_case)]
+enum State{
+    Active,
+    Stopped
+}
+
 pub struct Responder {
-    services: Services,
-    commands: RefCell<CommandSender>,
-    shutdown: Arc<Shutdown>,
+    fsms: Vec<FSM>,
+    advertised_services: Services,
+    resolved_services: Services,
+    commands: Arc<RwLock<CommandSender>>,
+    state : Arc<RwLock<State>>
 }
 
 pub struct Service {
-    id: usize,
-    services: Services,
-    commands: CommandSender,
-    _shutdown: Arc<Shutdown>,
+    id: String,
 }
 
 impl Responder {   
@@ -57,18 +69,24 @@ impl Responder {
             hostname.push_str(".local");
         }
 
-        let services = Arc::new(RwLock::new(ServicesInner::new(hostname)));
+        let advertised_services = Arc::new(RwLock::new(ServicesInner::new(hostname.clone())));
+	let resolved_services = Arc::new(RwLock::new(ServicesInner::new(hostname)));
 
-        let v4 = FSM::<Inet>::new(&services);
-        let v6 = FSM::<Inet6>::new(&services);
+        let v4 = FSM::new(&advertised_services,&resolved_services,Inet());
+        let v6 = FSM::new(&advertised_services,&resolved_services,Inet6());
+	let mut fsms = vec![];
 
         let commands = match (v4, v6) {
-            (Ok(v4_command), Ok(v6_command)) => {
+            (Ok((v4_fsm, v4_command)),Ok((v6_fsm, v6_command))) => {
+		fsms.push(v4_fsm);
+		fsms.push(v6_fsm);
                 vec![v4_command, v6_command]
+		    
             },
 
-            (Ok(v4_command), Err(_)) => {
-		vec![v4_command]
+            (Ok((v4_fsm, v4_command)), Err(_)) => {
+		fsms.push(v4_fsm);
+		vec![v4_command]		   
             }
 
             (Err(err), _) => return Err(err),
@@ -76,19 +94,74 @@ impl Responder {
 
         let commands = CommandSender(commands);
         let responder = Responder {
-            services: services,
-            commands: RefCell::new(commands.clone()),
-            shutdown: Arc::new(Shutdown(commands)),
+	    fsms,
+            advertised_services: advertised_services,
+	    resolved_services: resolved_services,
+            commands: Arc::new(RwLock::new(commands.clone())),
+	    state: Arc::new(RwLock::new(State::Active))
+
         };
 
         Ok(responder)
     }
+    
+    #[allow(non_snake_case)]
+    pub fn start(&self)->Vec<tokio::task::JoinHandle<()>>{
+	let mut tasks = vec![];
+	for fsm in self.fsms.iter(){
+	    let (r,w) = fsm.start();
+	    tasks.push(r);
+	    tasks.push(w);
+	}
+
+
+	let services = self.resolved_services.clone();
+	let commands = self.commands.clone();
+	let state = self.state.clone();
+	
+	let handle = 
+	    tokio::spawn(
+		async move {
+		    let mut interval = time::interval(Duration::from_secs(5));		    
+		    while let Some(instant) = interval.next().await{
+			info!("Resolve periodically at {:?}",instant);
+			let guard = state.read().await;
+			match &*guard {
+			    State::Stopped=>{
+				info!("Notifications stopped");
+				return;
+			    },
+			    _=>{}
+			}
+			
+			let services = services.write().await;
+			for svc in services.get_all().iter(){
+			    let commands = commands.clone();
+			    let svc = svc.clone();
+			    commands
+				.write().await            		    
+				.send_resolve_request(svc).await;
+			}
+			
+		    }		    					
+		}
+	    );
+	tasks.push(handle);	 
+	tasks
+    }
+
+    pub async fn shutdown(&self){
+	let mut state = self.state.write().await;
+	*state = State::Stopped;
+	 self.commands
+            .write().await
+            .send_shutdown().await;
+    }
 }
 
 impl Responder {
-    pub fn register(&self, svc_type: String, svc_name: String, port: u16, txt: &[&str]) -> Service {
-	debug!("Register");
-        let txt = if txt.is_empty() {
+    fn check_txt(&self, txt:&[&str]) -> Vec<u8>{
+	let txt = if txt.is_empty() {
             vec![0]
         } else {
             txt.into_iter()
@@ -101,63 +174,107 @@ impl Responder {
                 })
                 .collect()
         };
+	txt
+    }
+	
+	
+    pub async fn register(&self, svc_type: String, svc_name: String, port: u16, txt: &[&str]) -> Result<Service,()> {
+	info!("Register");
+        let txt = self.check_txt(txt);
 
         let svc = ServiceData {
-            typ: Name::from_str(format!("{}.local", svc_type)).unwrap(),
-            name: Name::from_str(format!("{}.{}.local", svc_name, svc_type)).unwrap(),
+	    svc_type: Name::from_str(format!("{}.local", svc_type)).unwrap(),
+            svc_name: Name::from_str(format!("{}.{}.local", svc_name, svc_type)).unwrap(),
             port: port,
             txt: txt,
         };
 
         self.commands
-            .borrow_mut()
-            .send_unsolicited(svc.clone(), DEFAULT_TTL, true);
+	    .write().await            
+            .send_unsolicited(svc.clone(), DEFAULT_TTL, true).await;
 
-        let id = self.services.write().unwrap().register(svc);
+        self.advertised_services.write().await.register(svc).map(|s| Service { id: s }).map_err(|_| ())        
+    }
 
-        Service {
-            id: id,
-            commands: self.commands.borrow().clone(),
-            services: self.services.clone(),
-            _shutdown: self.shutdown.clone(),
-        }
+    pub async fn advertise_gratitously(&self, svc_type: String, svc_name: String, port: u16, txt: &[&str]) {
+	info!("Advertise gratitously");
+	let txt = self.check_txt(txt);
+	
+	let svc = ServiceData {
+	    svc_type: Name::from_str(format!("{}.local", svc_type)).unwrap(),
+            svc_name: Name::from_str(format!("{}.{}.local", svc_name, svc_type)).unwrap(),
+            port: port,
+            txt: txt,
+        };
+	self.commands.write().await.send_unsolicited(svc.clone(), DEFAULT_TTL, true).await;
+
+    }
+
+    pub async fn resolve(&self, svc_type: String,listener: tokio::sync::mpsc::Sender<(String,SocketAddr)>) {
+	info!("Resolve {}" ,svc_type);
+	
+	let svc = ServiceData {
+            svc_type: Name::from_str(format!("{}.local", svc_type)).unwrap(),
+            svc_name: Name::from_str(format!("{}.local", svc_type)).unwrap(),
+            port: 0,
+            txt: vec![],
+
+        };
+
+	let mut services =  self.resolved_services.write().await;
+	let rr = services.register(svc.clone());
+	
+	match rr{
+	    Ok(id) => {
+		services.add_listener(id, listener);
+		self.commands
+		    .write().await            		    
+		    .send_resolve_request(svc).await;
+	    },
+	    Err(id)=> {
+		services.add_listener(id, listener);
+	    }
+	};
+	
+    }
+
+
+    pub async fn unregister(&self, id:String) {
+	info!("Unregister");
+        self.advertised_services.write().await.unregister(id);
     }
 }
 
-impl Drop for Service {
-    fn drop(&mut self) {
-        let svc = self.services.write().unwrap().unregister(self.id);
-        self.commands.send_unsolicited(svc, 0, false);
-    }
-}
 
-struct Shutdown(CommandSender);
-
-impl Drop for Shutdown {
-    fn drop(&mut self) {
-        self.0.send_shutdown();
-        // TODO wait for tasks to shutdown
-    }
-}
 
 #[derive(Clone)]
-struct CommandSender(Vec<mpsc::UnboundedSender<Command>>);
+struct CommandSender(Vec<mpsc::Sender<Command>>);
 impl CommandSender {
-    fn send(&mut self, cmd: Command) {
+    async fn send(&mut self, cmd: Command) {
         for tx in self.0.iter_mut() {
-            tx.unbounded_send(cmd.clone()).expect("responder died");
+            if let Err(mpsc::error::SendError(_t)) = tx.send(cmd.clone()).await{
+
+	    }
         }
     }
 
-    fn send_unsolicited(&mut self, svc: ServiceData, ttl: u32, include_ip: bool) {
+    async fn send_unsolicited(&mut self, svc: ServiceData, ttl: u32, include_ip: bool) {
+	info!("Sending unsolicited advertisement {:?}",svc);
         self.send(Command::SendUnsolicited {
             svc: svc,
             ttl: ttl,
             include_ip: include_ip,
-        });
+        }).await;
     }
 
-    fn send_shutdown(&mut self) {
-        self.send(Command::Shutdown);
+    async fn send_resolve_request(&mut self, svc: ServiceData) {
+	info!("Sending resolve request ");
+        self.send(Command::SendResolveRequest {
+            svc,
+        }).await;
+    }
+
+    async fn send_shutdown(&mut self) {
+        self.send(Command::Shutdown).await;
     }
 }

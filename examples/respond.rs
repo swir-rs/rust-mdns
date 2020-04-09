@@ -2,21 +2,49 @@
 extern crate log;
 extern crate env_logger;
 extern crate mdns_responder;
+use std::env;
 
-pub fn main() {
+
+#[tokio::main(core_threads = 1)]
+async fn main() {
+    let key = "service_name";
     env_logger::init();
-
+    let service_name = if let Ok(service_name)= env::var(key)  {
+	info!("Service name {}", service_name);
+	service_name
+    }else{
+	warn!("No service name");
+	return;
+    };
+    
+    
     let responder = mdns_responder::Responder::new().unwrap();
-    debug!("Register");
+    let tasks = responder.start();
+
     
     let _svc = responder.register(
-        "swir".to_owned(),
-        "blah".to_owned(),
-        8080,
-        &["path=/"],
-    );
+	"_tcp._swir".to_owned(),
+	service_name.to_owned(),        
+	8080,
+	&["path=/"],
+    ).await;
 
-    loop {
-        ::std::thread::sleep(::std::time::Duration::from_secs(10));
-    }
+
+    let (sender,receiver) = tokio::sync::mpsc::channel(10);    
+    responder.resolve("_tcp._swir".to_owned(),sender ).await;
+    
+    tokio::spawn(async {
+	let mut recv = receiver;
+	while let Some(socket) = recv.recv().await{
+	    info!("Resolved for {:?} ", socket);
+	};	
+    });
+    
+    tokio::time::delay_for(tokio::time::Duration::from_secs(120)).await;
+    info!("Shutting down ");
+    responder.shutdown().await;
+
+    futures::future::join_all(tasks).await;
+    info!("Exiting ... :)");
+    
 }
