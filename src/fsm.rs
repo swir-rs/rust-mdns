@@ -1,18 +1,17 @@
 use dns_parser::{self, Name, QueryClass, QueryType, RRData};
-use futures::sync::mpsc;
-use futures::{Async, Future, Poll, Stream};
+use futures::channel::mpsc;
 use get_if_addrs::get_if_addrs;
-use std::collections::VecDeque;
+use crate::futures::stream::StreamExt;
+use crate::futures::SinkExt;
 use std::io;
-use std::io::ErrorKind::WouldBlock;
 use std::marker::PhantomData;
 use std::net::{IpAddr, SocketAddr};
 use tokio::net::UdpSocket;
-use tokio::reactor::Handle;
+use tokio::net::udp::{SendHalf, RecvHalf};
 
 use super::{DEFAULT_TTL, MDNS_PORT};
-use address_family::AddressFamily;
-use services::{ServiceData, Services};
+use crate::address_family::AddressFamily;
+use crate::services::{ServiceData, Services};
 
 pub type AnswerBuilder = dns_parser::Builder<dns_parser::Answers>;
 
@@ -23,59 +22,46 @@ pub enum Command {
         ttl: u32,
         include_ip: bool,
     },
+    SendResponse {
+        response : Vec<u8>,
+        addr: SocketAddr
+    },
+	    
     Shutdown,
 }
 
 pub struct FSM<AF: AddressFamily> {
-    socket: UdpSocket,
+    recv_half:RecvHalf,
+    send_half:SendHalf,
     services: Services,
     commands: mpsc::UnboundedReceiver<Command>,
-    outgoing: VecDeque<(Vec<u8>, SocketAddr)>,
+    outgoing: mpsc::UnboundedSender<Command>,
     _af: PhantomData<AF>,
 }
 
 impl<AF: AddressFamily> FSM<AF> {
     pub fn new(
-        handle: &Handle,
         services: &Services,
-    ) -> io::Result<(FSM<AF>, mpsc::UnboundedSender<Command>)> {
+    ) -> io::Result<mpsc::UnboundedSender<Command>> {
         let std_socket = AF::bind()?;
-        let socket = UdpSocket::from_socket(std_socket, handle)?;
+        let socket = UdpSocket::from_std(std_socket).unwrap();
+	let (recv_half, send_half) = socket.split(); 
         let (tx, rx) = mpsc::unbounded();
 
-        let fsm = FSM {
-            socket: socket,
+        let fsm = FSM::<AF>{	              
+	    recv_half,
+	    send_half,	    
             services: services.clone(),
             commands: rx,
-            outgoing: VecDeque::new(),
+            outgoing: tx.clone(),
             _af: PhantomData,
         };
-
-        Ok((fsm, tx))
+	Ok(tx)
     }
 
-    fn recv_packets(&mut self) -> io::Result<()> {
-        let mut buf = [0u8; 4096];
-        loop {
-            let (bytes, addr) = match self.socket.recv_from(&mut buf) {
-                Ok((bytes, addr)) => (bytes, addr),
-                Err(ref ioerr) if ioerr.kind() == WouldBlock => break,
-                Err(err) => return Err(err),
-            };
-
-            if bytes >= buf.len() {
-                warn!("buffer too small for packet from {:?}", addr);
-                continue;
-            }
-
-            self.handle_packet(&buf[..bytes], addr);
-        }
-        Ok(())
-    }
-
-    fn handle_packet(&mut self, buffer: &[u8], addr: SocketAddr) {
-        trace!("received packet from {:?}", addr);
-
+    async fn handle_packet(&mut self, buffer: &[u8], addr: SocketAddr) {
+        debug!("received packet from {:?}", addr);
+	
         let packet = match dns_parser::Packet::parse(buffer) {
             Ok(packet) => packet,
             Err(error) => {
@@ -84,8 +70,9 @@ impl<AF: AddressFamily> FSM<AF> {
             }
         };
 
+	debug!("received header {:?} with  {:?}", packet.header,addr);
         if !packet.header.query {
-            trace!("received packet from {:?} with no query", addr);
+            warn!("received packet from {:?} with no query", addr);
             return;
         }
 
@@ -119,13 +106,26 @@ impl<AF: AddressFamily> FSM<AF> {
         if !multicast_builder.is_empty() {
             let response = multicast_builder.build().unwrap_or_else(|x| x);
             let addr = SocketAddr::new(AF::mdns_group(), MDNS_PORT);
-            self.outgoing.push_back((response, addr));
-        }
+            let res = self.outgoing.send(Command::SendResponse{response, addr}).await;
+	    if let Err(e) = res{
+		warn!("Receiving end closed {}",e);
+	    }
+	    
+        }else{
+	    debug!("Multicast builder is empty");
+	}
 
         if !unicast_builder.is_empty() {
             let response = unicast_builder.build().unwrap_or_else(|x| x);
-            self.outgoing.push_back((response, addr));
-        }
+	    let addr = SocketAddr::new(AF::mdns_group(), MDNS_PORT);
+	    let res = self.outgoing.send(Command::SendResponse{response, addr}).await;
+	    if let Err(e) = res{
+		warn!("Receiving end closed {}",e);
+	    }
+
+        }else{
+	    debug!("Unicast builder is empty");
+	}
     }
 
     fn handle_question(
@@ -134,7 +134,7 @@ impl<AF: AddressFamily> FSM<AF> {
         mut builder: AnswerBuilder,
     ) -> AnswerBuilder {
         let services = self.services.read().unwrap();
-
+	debug!("Handle question {}",question.qname);
         match question.qtype {
             QueryType::A | QueryType::AAAA | QueryType::All
                 if question.qname == *services.get_hostname() =>
@@ -151,7 +151,9 @@ impl<AF: AddressFamily> FSM<AF> {
             }
             QueryType::SRV => {
                 if let Some(svc) = services.find_by_name(&question.qname) {
+		    builder = svc.add_ptr_rr(builder, DEFAULT_TTL);
                     builder = svc.add_srv_rr(services.get_hostname(), builder, DEFAULT_TTL);
+		    builder = svc.add_txt_rr(builder, DEFAULT_TTL);
                     builder = self.add_ip_rr(services.get_hostname(), builder, DEFAULT_TTL);
                 }
             }
@@ -195,69 +197,123 @@ impl<AF: AddressFamily> FSM<AF> {
         builder
     }
 
-    fn send_unsolicited(&mut self, svc: &ServiceData, ttl: u32, include_ip: bool) {
+    async fn send_unsolicited(&mut self, svc: &ServiceData, ttl: u32, include_ip: bool) {
         let mut builder =
             dns_parser::Builder::new_response(0, false).move_to::<dns_parser::Answers>();
         builder.set_max_size(None);
-
-        let services = self.services.read().unwrap();
-
-        builder = svc.add_ptr_rr(builder, ttl);
-        builder = svc.add_srv_rr(services.get_hostname(), builder, ttl);
-        builder = svc.add_txt_rr(builder, ttl);
-        if include_ip {
-            builder = self.add_ip_rr(services.get_hostname(), builder, ttl);
-        }
+	debug!("Sending unsolicited method");
+	{	    
+            let services = self.services.read().unwrap();
+            builder = svc.add_ptr_rr(builder, ttl);
+            builder = svc.add_srv_rr(services.get_hostname(), builder, ttl);
+            builder = svc.add_txt_rr(builder, ttl);
+            if include_ip {
+		builder = self.add_ip_rr(services.get_hostname(), builder, ttl);
+            }
+	}
 
         if !builder.is_empty() {
             let response = builder.build().unwrap_or_else(|x| x);
             let addr = SocketAddr::new(AF::mdns_group(), MDNS_PORT);
-            self.outgoing.push_back((response, addr));
+            self.send_response(response, addr).await;
         }
+    }
+
+    async fn send_response(&mut self,data: Vec<u8>, addr: SocketAddr) {
+	let res = self.send_half.send_to(&data,&addr).await;
+	if let Err(e) = res{
+	    warn!("Can't send {:?}",e);
+	};
+    }
+
+    async fn send(&mut self){	
+	while let Some(command) = self.commands.next().await{
+	    match command{
+		Command::Shutdown =>{
+		    debug!("Shutting down");
+		    self.commands.close();
+		},
+		Command::SendUnsolicited{
+		    svc,ttl,include_ip
+		}=>{
+		    self.send_unsolicited(&svc, ttl, include_ip).await;		    
+		    
+		},
+		Command::SendResponse{response, addr}=>{
+		    self.send_response(response,addr).await;		    		    		    
+		}		    			    			
+	    }
+	    
+	}	
+    }
+
+    async fn receive(&mut self, mut socket_rx :tokio::net::udp::RecvHalf){
+	loop{
+	    let mut buf = [0u8; 4096];
+	    let res = socket_rx.recv_from(&mut buf).await;
+	    match res{
+		Ok((bytes,addr))=>{
+		    if bytes > buf.len(){
+			warn!("Discarding as packet with {} bytes is too long for the buffer {}",bytes, buf.len());
+		    };
+		    trace!("Received packet {:x?}",&buf[..bytes]);
+		    self.handle_packet(&buf[..bytes], addr).await;
+		    
+		    
+		    
+		},
+		Err(e)=> {
+		    info!("Socket terminated {:?}",e);
+		    return;
+		}	   	    
+	    }
+	
+	}
     }
 }
 
-impl<AF: AddressFamily> Future for FSM<AF> {
-    type Item = ();
-    type Error = io::Error;
-    fn poll(&mut self) -> Poll<(), io::Error> {
-        while let Async::Ready(cmd) = self.commands.poll().unwrap() {
-            match cmd {
-                Some(Command::Shutdown) => return Ok(Async::Ready(())),
-                Some(Command::SendUnsolicited {
-                    svc,
-                    ttl,
-                    include_ip,
-                }) => {
-                    self.send_unsolicited(&svc, ttl, include_ip);
-                }
-                None => {
-                    warn!("responder disconnected without shutdown");
-                    return Ok(Async::Ready(()));
-                }
-            }
-        }
+// impl<AF: AddressFamily> Future for FSM<AF> {
+//     type Output = Result<(),io::Error>;
+//     fn poll(mut self: Pin<&mut Self>,cx: &mut Context) -> Poll<Self::Output> {
+//         while let cmd= self.commands.try_next().unwrap() {
+//             match cmd {
+//                 Some(Command::Shutdown) => return Poll::Ready(Ok(())),
+//                 Some(Command::SendUnsolicited {
+//                     svc,
+//                     ttl,
+//                     include_ip,
+//                 }) => {
+// 		    debug!("Sending unsolicited  ?");
+//                     self.send_unsolicited(&svc, ttl, include_ip);
+//                 }
+//                 None => {
+//                     warn!("responder disconnected without shutdown");
+//                     return Poll::Ready(Ok(()));
+//                 }
+//             }
+//         }
+	
+//         while let Poll::Ready(Ok(())) = self.socket.poll_read() {
+//             self.recv_packets()?;
+//         }
 
-        while let Async::Ready(()) = self.socket.poll_read() {
-            self.recv_packets()?;
-        }
+//         loop {
+//             if let Some(&(ref response, ref addr)) = self.outgoing.front() {
+//                 trace!("sending packet to {:?}", addr);
 
-        loop {
-            if let Some(&(ref response, ref addr)) = self.outgoing.front() {
-                trace!("sending packet to {:?}", addr);
+//                 match self.socket.send_to(response, addr) {
+//                     Ok(_) => (),
+//                     Err(ref ioerr) if ioerr.kind() == WouldBlock => break,
+//                     Err(err) => warn!("error sending packet {:?}", err),
+//                 }
+//             } else {
+//                 break;
+//             }
 
-                match self.socket.send_to(response, addr) {
-                    Ok(_) => (),
-                    Err(ref ioerr) if ioerr.kind() == WouldBlock => break,
-                    Err(err) => warn!("error sending packet {:?}", err),
-                }
-            } else {
-                break;
-            }
+//             self.outgoing.pop_front();
+//         }
 
-            self.outgoing.pop_front();
-        }
+//         Poll::Pending
+//     }
 
-        Ok(Async::NotReady)
-    }
-}
+// }

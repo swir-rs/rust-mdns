@@ -10,16 +10,16 @@ extern crate multimap;
 extern crate net2;
 extern crate nix;
 extern crate rand;
-extern crate tokio_core as tokio;
 
 use dns_parser::Name;
-use futures::Future;
-use futures::sync::mpsc;
+use futures::{Future};
+
+
+use futures::channel::mpsc;
 use std::cell::RefCell;
 use std::io;
 use std::sync::{Arc, RwLock};
-use std::thread;
-use tokio::reactor::{Core, Handle};
+
 
 mod address_family;
 mod fsm;
@@ -50,64 +50,25 @@ pub struct Service {
     _shutdown: Arc<Shutdown>,
 }
 
-type ResponderTask = Box<Future<Item = (), Error = io::Error> + Send>;
-
-impl Responder {
-    fn setup_core() -> io::Result<(Core, ResponderTask, Responder)> {
-        let core = Core::new()?;
-        let (responder, task) = Self::with_handle(&core.handle())?;
-        Ok((core, task, responder))
-    }
-
+impl Responder {   
     pub fn new() -> io::Result<Responder> {
-        let (tx, rx) = std::sync::mpsc::sync_channel(0);
-        thread::Builder::new()
-            .name("mdns-responder".to_owned())
-            .spawn(move || match Self::setup_core() {
-                Ok((mut core, task, responder)) => {
-                    tx.send(Ok(responder)).expect("tx responder channel closed");
-                    core.run(task).expect("mdns thread failed");
-                }
-                Err(err) => {
-                    tx.send(Err(err)).expect("tx responder channel closed");
-                }
-            })?;
-
-        rx.recv().expect("rx responder channel closed")
-    }
-
-    pub fn spawn(handle: &Handle) -> io::Result<Responder> {
-        let (responder, task) = Responder::with_handle(handle)?;
-        handle.spawn(task.map_err(|e| {
-            warn!("mdns error {:?}", e);
-            ()
-        }));
-        Ok(responder)
-    }
-
-    pub fn with_handle(handle: &Handle) -> io::Result<(Responder, ResponderTask)> {
-        let mut hostname = try!(net::gethostname());
+        let mut hostname = net::gethostname()?;
         if !hostname.ends_with(".local") {
             hostname.push_str(".local");
         }
 
         let services = Arc::new(RwLock::new(ServicesInner::new(hostname)));
 
-        let v4 = FSM::<Inet>::new(handle, &services);
-        let v6 = FSM::<Inet6>::new(handle, &services);
+        let v4 = FSM::<Inet>::new(&services);
+        let v6 = FSM::<Inet6>::new(&services);
 
-        let (task, commands): (ResponderTask, _) = match (v4, v6) {
-            (Ok((v4_task, v4_command)), Ok((v6_task, v6_command))) => {
-                let task = v4_task.join(v6_task).map(|((), ())| ());
-                let task = Box::new(task);
+        let commands = match (v4, v6) {
+            (Ok(v4_command), Ok(v6_command)) => {
+                vec![v4_command, v6_command]
+            },
 
-                let commands = vec![v4_command, v6_command];
-                (task, commands)
-            }
-
-            (Ok((v4_task, v4_command)), Err(err)) => {
-                warn!("Failed to register IPv6 receiver: {:?}", err);
-                (Box::new(v4_task), vec![v4_command])
+            (Ok(v4_command), Err(_)) => {
+		vec![v4_command]
             }
 
             (Err(err), _) => return Err(err),
@@ -120,12 +81,13 @@ impl Responder {
             shutdown: Arc::new(Shutdown(commands)),
         };
 
-        Ok((responder, task))
+        Ok(responder)
     }
 }
 
 impl Responder {
     pub fn register(&self, svc_type: String, svc_name: String, port: u16, txt: &[&str]) -> Service {
+	debug!("Register");
         let txt = if txt.is_empty() {
             vec![0]
         } else {

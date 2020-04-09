@@ -1,8 +1,8 @@
 [package]
-name = "mdns"
+name = "mdns-responder"
 version = "0.2.0"
 authors = ["Paul Lietar <paul@lietar.net>"]
-
+edition = "2018"
 description = "Rust mDNS responder"
 repository = "https://github.com/plietar/rust-mdns"
 readme = "README.md"
@@ -10,17 +10,19 @@ license = "MIT"
 
 [dependencies]
 byteorder = "1.2"
-futures = "0.1"
+futures = "0.3"
 get_if_addrs = "0.5"
 libc = "0.2"
 log = "0.4"
 multimap = "0.4"
 net2 = "0.2"
-nix = "0.11"
-rand = "0.5"
-tokio-core = "0.1"
+nix = "0.17"
+rand = "*"
+tokio = { version = "=0.2", features = ["full","sync"]}
 
-dns-parser = { git = "https://github.com/plietar/dns-parser" }
+
+#dns-parser = { git = "https://github.com/plietar/dns-parser" }
+dns-parser = { path= "../dns-parser" }
 
 [target.'cfg(windows)'.dependencies]
 winapi = "0.2.8"
@@ -28,4 +30,5 @@ kernel32-sys = "0.2.2"
 socket2 = "0.2.2"
 
 [dev-dependencies]
-env_logger = "0.5"
+env_logger = "0.7"
+	   

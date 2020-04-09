@@ -38,6 +38,7 @@ impl AddressFamily for Inet {
         IpAddr::V4(Ipv4Addr::new(224, 0, 0, 251))
     }
     fn join_multicast(socket: &UdpSocket) -> io::Result<()> {
+	socket.set_multicast_loop_v4(true)?;
         socket.join_multicast_v4(&Ipv4Addr::new(224, 0, 0, 251), &Ipv4Addr::new(0, 0, 0, 0))
     }
     fn v6() -> bool {
@@ -56,6 +57,7 @@ impl AddressFamily for Inet6 {
         IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xfb))
     }
     fn join_multicast(socket: &UdpSocket) -> io::Result<()> {
+	socket.set_multicast_loop_v6(true)?;
         socket.join_multicast_v6(&Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xfb), 0)
     }
     fn v6() -> bool {

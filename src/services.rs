@@ -48,6 +48,7 @@ impl ServicesInner {
     }
 
     pub fn register(&mut self, svc: ServiceData) -> usize {
+	debug!("register");
         let mut id = thread_rng().gen::<usize>();
         while self.by_id.contains_key(&id) {
             id = thread_rng().gen::<usize>();
