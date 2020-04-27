@@ -21,8 +21,8 @@ rand = "*"
 tokio = { version = "=0.2", features = ["full","sync"]}
 
       
-#dns-parser = { git = "https://github.com/plietar/dns-parser" }
-dns-parser = { path= "../dns-parser" }
+dns-parser = { git = "https://github.com/plietar/dns-parser" }
+#dns-parser = { path= "../dns-parser" }
 #dns-parser = "0.8"
 
 [target.'cfg(windows)'.dependencies]

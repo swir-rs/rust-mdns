@@ -95,9 +95,9 @@ impl Responder {
         let commands = CommandSender(commands);
         let responder = Responder {
 	    fsms,
-            advertised_services: advertised_services,
-	    resolved_services: resolved_services,
-            commands: Arc::new(RwLock::new(commands.clone())),
+            advertised_services,
+	    resolved_services,
+            commands: Arc::new(RwLock::new(commands)),
 	    state: Arc::new(RwLock::new(State::Active))
 
         };
@@ -124,14 +124,11 @@ impl Responder {
 		async move {
 		    let mut interval = time::interval(Duration::from_secs(5));		    
 		    while let Some(instant) = interval.next().await{
-			info!("Resolve periodically at {:?}",instant);
+			debug!("Resolve periodically at {:?}",instant);
 			let guard = state.read().await;
-			match &*guard {
-			    State::Stopped=>{
-				info!("Notifications stopped");
-				return;
-			    },
-			    _=>{}
+			if let State::Stopped = &*guard {
+			    info!("Notifications stopped");
+			    return;
 			}
 			
 			let services = services.write().await;
@@ -161,20 +158,19 @@ impl Responder {
 
 impl Responder {
     fn check_txt(&self, txt:&[&str]) -> Vec<u8>{
-	let txt = if txt.is_empty() {
+	if txt.is_empty() {
             vec![0]
         } else {
-            txt.into_iter()
+            txt.iter()
                 .flat_map(|entry| {
                     let entry = entry.as_bytes();
                     if entry.len() > 255 {
                         panic!("{:?} is too long for a TXT record", entry);
                     }
-                    std::iter::once(entry.len() as u8).chain(entry.into_iter().cloned())
+                    std::iter::once(entry.len() as u8).chain(entry.iter().cloned())
                 })
                 .collect()
-        };
-	txt
+        }
     }
 	
 	
@@ -183,10 +179,10 @@ impl Responder {
         let txt = self.check_txt(txt);
 
         let svc = ServiceData {
-	    svc_type: Name::from_str(format!("{}.local", svc_type)).unwrap(),
-            svc_name: Name::from_str(format!("{}.{}.local", svc_name, svc_type)).unwrap(),
-            port: port,
-            txt: txt,
+	    svc_type: Name::from_str(format!("{}", svc_type)).unwrap(),
+            svc_name: Name::from_str(format!("{}.{}", svc_name, svc_type)).unwrap(),
+            port,
+            txt,
         };
 
         self.commands
@@ -201,10 +197,10 @@ impl Responder {
 	let txt = self.check_txt(txt);
 	
 	let svc = ServiceData {
-	    svc_type: Name::from_str(format!("{}.local", svc_type)).unwrap(),
-            svc_name: Name::from_str(format!("{}.{}.local", svc_name, svc_type)).unwrap(),
-            port: port,
-            txt: txt,
+	    svc_type: Name::from_str(format!("{}", svc_type)).unwrap(),
+            svc_name: Name::from_str(format!("{}.{}", svc_name, svc_type)).unwrap(),
+            port,
+            txt,
         };
 	self.commands.write().await.send_unsolicited(svc.clone(), DEFAULT_TTL, true).await;
 
@@ -214,8 +210,8 @@ impl Responder {
 	info!("Resolve {}" ,svc_type);
 	
 	let svc = ServiceData {
-            svc_type: Name::from_str(format!("{}.local", svc_type)).unwrap(),
-            svc_name: Name::from_str(format!("{}.local", svc_type)).unwrap(),
+            svc_type: Name::from_str(format!("{}", svc_type)).unwrap(),
+            svc_name: Name::from_str(format!("{}", svc_type)).unwrap(),
             port: 0,
             txt: vec![],
 
@@ -261,14 +257,14 @@ impl CommandSender {
     async fn send_unsolicited(&mut self, svc: ServiceData, ttl: u32, include_ip: bool) {
 	info!("Sending unsolicited advertisement {:?}",svc);
         self.send(Command::SendUnsolicited {
-            svc: svc,
-            ttl: ttl,
-            include_ip: include_ip,
+            svc,
+            ttl,
+            include_ip,
         }).await;
     }
 
     async fn send_resolve_request(&mut self, svc: ServiceData) {
-	info!("Sending resolve request ");
+	debug!("Sending resolve request ");
         self.send(Command::SendResolveRequest {
             svc,
         }).await;

@@ -50,21 +50,14 @@ pub struct FSM {
     outgoing: mpsc::Sender<Command>
 }
 
-fn parse_service_name<'a>(service: String )-> (String,Option<String>) {
-    let service = service.to_string();
-    let ind = service.find(".");
+fn parse_service_name(service: String )-> (String,Option<String>) {
+    
+    let ind = service.find('.');
     let service_type;
     if let Some(i) = ind{
-
-	    if service.ends_with(".local"){
-//	        service_type = Some(String::from(&service[(i+1)..(service.len()-".local".len())]));
 		service_type = Some(String::from(&service[(i+1)..]));
-	    }else{
-	        service_type = Some(String::from(&service[(i+1)..]));
-	    }
-	}else{
-	
-	    service_type=None;
+    }else{
+	service_type=None;
     }
     (service, service_type)
 }
@@ -152,20 +145,16 @@ async fn handle_resolve_response(services:Services, packet: dns_parser::Packet<'
 
     
     debug!("handle_resolve_response :  Handling resolve response : query {} resolved IP {:?} port {:?} service {:?}", packet.header.query, ip, port, service);
-    match (ip, port, service){
-	(Some(ip), Some(port), Some(service))=>{
-	    let (service_name, service_type) = parse_service_name(service);
-	    debug!("handle_resolve_response : service_type {:?}", service_type);
-	    if let Some(service_type) = service_type{
-		if let Ok(svc_type) = Name::from_str(service_type){
-		    let mut services = services.write().await;
-		    services.send_notification(&svc_type,service_name,SocketAddr::from((ip.clone(),port)));				
-		}
+    if let (Some(ip), Some(port), Some(service)) = (ip, port, service){
+	let (service_name, service_type) = parse_service_name(service);
+	debug!("handle_resolve_response : service_type {:?}", service_type);
+	if let Some(service_type) = service_type{
+	    if let Ok(svc_type) = Name::from_str(service_type){
+		let mut services = services.write().await;
+		services.send_notification(&svc_type,service_name,SocketAddr::from((ip,port)));
 	    }
-	},
-	 _ => {}
-    };
-    
+	}
+    }
     
     None
 }
@@ -192,28 +181,29 @@ async fn handle_resolve_request(af_v6: bool, services:Services, packet: dns_pars
         if question.qclass == QueryClass::IN || question.qclass == QueryClass::Any {
             if question.qu {
                 unicast_builder = handle_question(af_v6,&services,&question, unicast_builder).await;
+		debug!("Unicast builder selected")
             } else {
                 multicast_builder = handle_question(af_v6,&services, &question, multicast_builder).await;
+		debug!("Multicast builder selected")
             }
         }
     }
 
-    let mut res = None;
+    
     if !multicast_builder.is_empty() {
+	
         let response = multicast_builder.build().unwrap_or_else(|x| x);
-        res = Some(response);	    
+        Some(response)
     }else{
 	trace!("handle_resolve_request : Multicast builder is empty");
+	if !unicast_builder.is_empty() {
+            let response = unicast_builder.build().unwrap_or_else(|x| x);
+	    Some(response)
+	}else{
+	    trace!("handle_resolve_request : Unicast builder is empty");
+	    None
+	}
     }
-
-    if !unicast_builder.is_empty() {
-        let response = unicast_builder.build().unwrap_or_else(|x| x);
-	res = Some(response);
-    }else{
-	trace!("handle_resolve_request : Unicast builder is empty");
-    }
-    res
-
 }
 
 async fn receive(recv_half:Arc<RwLock<RecvHalf>>,af_v6:bool, advertised_services: Services, resolved_services: Services, mut outgoing:mpsc::Sender<Command>,state: Arc<RwLock<FSMState>>){
@@ -221,12 +211,9 @@ async fn receive(recv_half:Arc<RwLock<RecvHalf>>,af_v6:bool, advertised_services
     let mut socket_rx = recv_half.write().await;        	
     loop{	
 	let state = state.read().await;
-	match *state{
-	    FSMState::Closed=>{
-		info!("receive: exited FSM is closed");
-		return;
-	    },
-	    _ => {}	    
+	if let FSMState::Closed = *state{
+	    info!("receive: exited FSM is closed");
+	    return;
 	}
 
 	let mut buf = [0u8; 4096];	
@@ -337,8 +324,8 @@ async fn send(send_half:Arc<RwLock<SendHalf>>,af_v6: bool, mdns_group: IpAddr, s
 		
 	    },
 
-	    Command::SendResponse{response, addr}=>{
-		send_response(&send_half,response,addr).await;		    		    		    
+	    Command::SendResponse{response, addr:_}=>{
+		send_response(&send_half,response,SocketAddr::new(mdns_group, MDNS_PORT)).await;		    		    		    
 	    },
 	    Command::SendResolveRequest{
 		svc

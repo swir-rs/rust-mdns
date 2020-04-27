@@ -126,13 +126,13 @@ impl RecordKind {
         use dns_parser::RRData;
 
         match data {
-            RRData::A(addr) => RecordKind::A(addr.clone()),
-            RRData::AAAA(addr) => RecordKind::AAAA(addr.clone()),
+            RRData::A(addr) => RecordKind::A(*addr),
+            RRData::AAAA(addr) => RecordKind::AAAA(*addr),
             RRData::CNAME(ref name) => RecordKind::CNAME(name.to_string()),
             RRData::MX{preference,exchange} => {
 		let ex = exchange.clone();
 		RecordKind::MX {
-                preference:preference.clone(),
+                preference:*preference,
                 exchange: ex.to_string(),
 		}
 	    },
@@ -153,7 +153,7 @@ impl RecordKind {
                 vec![String::from_utf8_lossy(txt).to_string()]
             ),
 
-            RRData::Unknown{typ:_, data} => RecordKind::Unimplemented(data.to_vec()),
+            RRData::Unknown{data,..} => RecordKind::Unimplemented(data.to_vec()),
         }
     }
 }

@@ -57,7 +57,7 @@ impl ServicesInner {
 
         FindByType {
             services: self,
-            ids: ids,
+            ids,
         }
     }
 
@@ -76,7 +76,7 @@ impl ServicesInner {
 
     pub fn add_listener(&mut self, id: String, listener: tokio::sync::mpsc::Sender<(String, SocketAddr)>){
 	debug!("add_listener");        
-        self.resolve_listeners.insert(id.clone(), listener);		   
+        self.resolve_listeners.insert(id, listener);		   
     }
 
     pub fn send_notification(&mut self, name: &Name, service_name: String, resolved_ip: SocketAddr){
@@ -85,26 +85,27 @@ impl ServicesInner {
 	let id = self.by_name.get(name);
 
 	if let Some(id) = id{
-	    let listeners = self.resolve_listeners.get_vec_mut(id).unwrap();
-	    let mut closed_channels = vec![];
-	    for (i,l) in listeners.iter_mut().enumerate(){
-		match l.try_send((service_name.clone(),resolved_ip)){
-		    Ok(())=>{},
-		    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-			
-		    },
-		    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-			closed_channels.push(i);
-		    },
+	    if let Some(listeners) = self.resolve_listeners.get_vec_mut(id){
+		let mut closed_channels = vec![];
+		for (i,l) in listeners.iter_mut().enumerate(){
+		    match l.try_send((service_name.clone(),resolved_ip)){
+			Ok(())=>{},
+			Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+			    
+			},
+			Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+			    closed_channels.push(i);
+			},
+		    }
 		}
-	    }
-	    for i in closed_channels.iter(){
+		for i in closed_channels.iter(){
 		listeners.remove(*i);	    
-	    }
-	    let id = id.clone();
-	    if listeners.is_empty(){
-		self.resolve_listeners.remove(&id);
-		self.unregister(id);
+		}
+		let id = id.clone();
+		if listeners.is_empty(){
+		    self.resolve_listeners.remove(&id);
+		    self.unregister(id);
+		}
 	    }
 	}else{
 	    debug!("Ingoring for {:?}",name );
