@@ -23,7 +23,7 @@ use tokio::sync::{RwLock,mpsc};
 use crate::futures::StreamExt;
 use tokio::time;
 use std::time::Duration;
-use std::net::SocketAddr;
+
 
 
 mod address_family;
@@ -38,7 +38,7 @@ mod services;
 
 use address_family::{Inet, Inet6};
 use fsm::{Command, FSM};
-use services::{ServiceData, Services, ServicesInner};
+use services::{ServiceData, Services, ServicesInner,ResolveListener};
 
 
 const DEFAULT_TTL: u32 = 60;
@@ -59,7 +59,7 @@ pub struct Responder {
 }
 
 pub struct Service {
-    id: String,
+    pub id: String,
 }
 
 impl Responder {   
@@ -206,7 +206,7 @@ impl Responder {
 
     }
 
-    pub async fn resolve(&self, svc_type: String,listener: tokio::sync::mpsc::Sender<(String,SocketAddr)>) {
+    pub async fn resolve(&self, svc_type: String,listener: ResolveListener) {
 	info!("Resolve {}" ,svc_type);
 	
 	let svc = ServiceData {
@@ -233,6 +233,8 @@ impl Responder {
 	};
 	
     }
+
+    
 
 
     pub async fn unregister(&self, id:String) {

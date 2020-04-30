@@ -11,6 +11,7 @@ pub type QuestionBuilder = dns_parser::Builder<dns_parser::Questions>;
 
 /// A collection of registered services is shared between threads.
 pub type Services = Arc<RwLock<ServicesInner>>;
+pub type ResolveListener = Box<dyn FnMut(String,SocketAddr)-> Result<(),()>+Send+Sync+'static>;
 
 pub struct ServicesInner {
     hostname: Name<'static>,
@@ -20,7 +21,7 @@ pub struct ServicesInner {
     by_type: MultiMap<Name<'static>, String>,
     /// maps to id
     by_name: HashMap<Name<'static>, String>,
-    pub resolve_listeners: MultiMap<String, tokio::sync::mpsc::Sender<(String,SocketAddr)>>,
+    pub resolve_listeners: MultiMap<String, ResolveListener> ,
 
 }
 
@@ -74,9 +75,9 @@ impl ServicesInner {
         Ok(id)
     }
 
-    pub fn add_listener(&mut self, id: String, listener: tokio::sync::mpsc::Sender<(String, SocketAddr)>){
+    pub fn add_listener(&mut self, id: String, callback: ResolveListener){
 	debug!("add_listener");        
-        self.resolve_listeners.insert(id, listener);		   
+        self.resolve_listeners.insert(id, callback);		   
     }
 
     pub fn send_notification(&mut self, name: &Name, service_name: String, resolved_ip: SocketAddr){
@@ -88,18 +89,17 @@ impl ServicesInner {
 	    if let Some(listeners) = self.resolve_listeners.get_vec_mut(id){
 		let mut closed_channels = vec![];
 		for (i,l) in listeners.iter_mut().enumerate(){
-		    match l.try_send((service_name.clone(),resolved_ip)){
+		    let res = l(service_name.clone(),resolved_ip.clone());
+		    match res{
 			Ok(())=>{},
-			Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-			    
-			},
-			Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+			Err(())=>{
 			    closed_channels.push(i);
-			},
+			}
 		    }
+		    
 		}
 		for i in closed_channels.iter(){
-		listeners.remove(*i);	    
+		    let _f = listeners.remove(*i);	    
 		}
 		let id = id.clone();
 		if listeners.is_empty(){

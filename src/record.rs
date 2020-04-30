@@ -1,5 +1,5 @@
 use std::net;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr};
 
 /// A DNS response.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,22 +102,7 @@ impl Response {
             RecordKind::SRV { port, .. } => Some(port),
             _ => None,
         })
-    }
-
-
-    pub fn socket_address(&self) -> Option<SocketAddr> {
-        Some((self.ip_addr()?, self.port()?).into())
-    }
-
-    pub fn txt_records(&self) -> impl Iterator<Item = &str> {
-        self.records()
-            .filter_map(|record| match record.kind {
-                RecordKind::TXT(ref txt) => Some(txt),
-                _ => None,
-            })
-            .flat_map(|txt| txt.iter())
-            .map(|txt| txt.as_str())
-    }
+    }    
     
 }
 
