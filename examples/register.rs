@@ -6,7 +6,7 @@ pub fn main() {
 
     let responder = mdns_responder::Responder::new().unwrap();
     let _svc = responder.register(
-	"_swir._tcp".to_owned(),
+        "_swir._tcp".to_owned(),
         "sidecar".to_owned(),
         8080,
         &["path=/"],

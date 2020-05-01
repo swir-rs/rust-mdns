@@ -1,12 +1,12 @@
 use std::net;
-use std::net::{IpAddr};
+use std::net::IpAddr;
 
 /// A DNS response.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Response {
     pub answers: Vec<Record>,
     pub nameservers: Vec<Record>,
-    pub additional: Vec<Record>
+    pub additional: Vec<Record>,
 }
 
 /// Any type of DNS record.
@@ -72,15 +72,13 @@ impl Response {
                 .collect(),
         }
     }
-    
+
     pub fn records(&self) -> impl Iterator<Item = &Record> {
         self.answers
             .iter()
             .chain(self.nameservers.iter())
             .chain(self.additional.iter())
     }
-
-    
 
     pub fn ip_addr(&self) -> Option<IpAddr> {
         self.records().find_map(|record| match record.kind {
@@ -102,8 +100,7 @@ impl Response {
             RecordKind::SRV { port, .. } => Some(port),
             _ => None,
         })
-    }    
-    
+    }
 }
 
 impl RecordKind {
@@ -114,31 +111,32 @@ impl RecordKind {
             RRData::A(addr) => RecordKind::A(*addr),
             RRData::AAAA(addr) => RecordKind::AAAA(*addr),
             RRData::CNAME(ref name) => RecordKind::CNAME(name.to_string()),
-            RRData::MX{preference,exchange} => {
-		let ex = exchange.clone();
-		RecordKind::MX {
-                preference:*preference,
-                exchange: ex.to_string(),
-		}
-	    },
+            RRData::MX {
+                preference,
+                exchange,
+            } => {
+                let ex = exchange.clone();
+                RecordKind::MX {
+                    preference: *preference,
+                    exchange: ex.to_string(),
+                }
+            }
             RRData::NS(ref name) => RecordKind::NS(name.to_string()),
             RRData::PTR(ref name) => RecordKind::PTR(name.to_string()),
-            RRData::SRV{
+            RRData::SRV {
                 priority,
                 weight,
                 port,
                 ref target,
             } => RecordKind::SRV {
-                priority:*priority,
-                weight:*weight,
-                port:*port,
+                priority: *priority,
+                weight: *weight,
+                port: *port,
                 target: target.to_string(),
             },
-            RRData::TXT(ref txt) => RecordKind::TXT(
-                vec![String::from_utf8_lossy(txt).to_string()]
-            ),
+            RRData::TXT(ref txt) => RecordKind::TXT(vec![String::from_utf8_lossy(txt).to_string()]),
 
-            RRData::Unknown{data,..} => RecordKind::Unimplemented(data.to_vec()),
+            RRData::Unknown { data, .. } => RecordKind::Unimplemented(data.to_vec()),
         }
     }
 }
