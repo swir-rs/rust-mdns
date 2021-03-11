@@ -13,7 +13,7 @@ extern crate rand;
 
 use dns_parser::Name;
 
-use crate::futures::StreamExt;
+
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -111,7 +111,7 @@ impl Responder {
 
         let handle = tokio::spawn(async move {
             let mut interval = time::interval(Duration::from_secs(5));
-            while let Some(instant) = interval.next().await {
+            while let Some(instant) = Some(interval.tick().await) {
                 debug!("Resolve periodically at {:?}", instant);
                 let guard = state.read().await;
                 if let State::Stopped = &*guard {

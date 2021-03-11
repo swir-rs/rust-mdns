@@ -5,7 +5,7 @@ extern crate mdns_responder;
 use std::env;
 use std::net::SocketAddr;
 
-#[tokio::main(core_threads = 1)]
+#[tokio::main(worker_threads = 1)]
 async fn main() {
     let key = "service_name";
     env_logger::init();
@@ -30,8 +30,8 @@ async fn main() {
         .await
         .unwrap();
 
-    let (mut sender1, receiver1) = tokio::sync::mpsc::channel(10);
-    let (mut sender2, receiver2) = tokio::sync::mpsc::channel(10);
+    let (sender1, receiver1) = tokio::sync::mpsc::channel(10);
+    let (sender2, receiver2) = tokio::sync::mpsc::channel(10);
 
     let callback_listener1 = move |fqdn: String, sock: SocketAddr| {
         let res = sender1.try_send((fqdn, sock));
@@ -78,10 +78,10 @@ async fn main() {
         }
     });
 
-    tokio::time::delay_for(tokio::time::Duration::from_secs(120)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
     info!("Unregisterting ");
     responder.unregister(svc.id).await;
-    tokio::time::delay_for(tokio::time::Duration::from_secs(20)).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
     info!("Shutting down ");
     responder.shutdown().await;
 

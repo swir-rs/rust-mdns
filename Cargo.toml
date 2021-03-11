@@ -1,7 +1,7 @@
 [package]
 name = "mdns-responder"
 version = "0.2.0"
-authors = ["Paul Lietar <paul@lietar.net>"]
+authors = ["Paul Lietar <paul@lietar.net>","Dawid Nowak <nowakd@gmail.com"]
 edition = "2018"
 description = "Rust mDNS responder"
 repository = "https://github.com/plietar/rust-mdns"
@@ -18,7 +18,8 @@ multimap = "0.4"
 net2 = "0.2"
 nix = "0.17"
 rand = "*"
-tokio = { version = "=0.2", features = ["full","sync"]}
+tokio = { version = "1.2", features = ["full","sync"] }
+
 
       
 dns-parser = { git = "https://github.com/plietar/dns-parser" }

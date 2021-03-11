@@ -1,5 +1,4 @@
 use dns_parser::{self, Name, QueryClass, QueryType, RRData};
-use futures::StreamExt;
 use get_if_addrs::get_if_addrs;
 use tokio::sync::mpsc;
 
@@ -7,7 +6,6 @@ use std::io;
 
 use crate::record::Response;
 use std::net::{IpAddr, SocketAddr};
-use tokio::net::udp::{RecvHalf, SendHalf};
 use tokio::net::UdpSocket;
 
 use super::{DEFAULT_TTL, MDNS_PORT};
@@ -40,8 +38,8 @@ pub enum Command {
 
 pub struct FSM {
     state: Arc<RwLock<FSMState>>,
-    recv_half: Arc<RwLock<RecvHalf>>,
-    send_half: Arc<RwLock<SendHalf>>,
+    recv_half: Arc<UdpSocket>,
+    send_half: Arc<UdpSocket>,
     mdns_group: IpAddr,
     af_v6: bool,
     advertised_services: Services,
@@ -218,15 +216,15 @@ async fn handle_resolve_request(
 }
 
 async fn receive(
-    recv_half: Arc<RwLock<RecvHalf>>,
+    recv_half: Arc<UdpSocket>,
     af_v6: bool,
     advertised_services: Services,
     resolved_services: Services,
-    mut outgoing: mpsc::Sender<Command>,
+    outgoing: mpsc::Sender<Command>,
     state: Arc<RwLock<FSMState>>,
 ) {
     debug!("received : entered");
-    let mut socket_rx = recv_half.write().await;
+    
     loop {
         let state = state.read().await;
         if let FSMState::Closed = *state {
@@ -235,7 +233,7 @@ async fn receive(
         }
 
         let mut buf = [0u8; 4096];
-        let res = timeout(Duration::from_secs(5), socket_rx.recv_from(&mut buf)).await;
+        let res = timeout(Duration::from_secs(5), recv_half.recv_from(&mut buf)).await;
         let advertised_services = advertised_services.clone();
         let resolved_services = resolved_services.clone();
         match res {
@@ -332,8 +330,7 @@ fn prepare_resolve_request(
     ))
 }
 
-async fn send_response(send_half: &Arc<RwLock<SendHalf>>, data: Vec<u8>, addr: SocketAddr) {
-    let mut send_half = send_half.write().await;
+async fn send_response(send_half: &Arc<UdpSocket>, data: Vec<u8>, addr: SocketAddr) {    
     let res = send_half.send_to(&data, &addr).await;
     if let Err(e) = res {
         warn!("Can't send {:?}", e);
@@ -341,7 +338,7 @@ async fn send_response(send_half: &Arc<RwLock<SendHalf>>, data: Vec<u8>, addr: S
 }
 
 async fn send(
-    send_half: Arc<RwLock<SendHalf>>,
+    send_half: Arc<UdpSocket>,
     af_v6: bool,
     mdns_group: IpAddr,
     services: Services,
@@ -350,7 +347,7 @@ async fn send(
 ) {
     debug!("send: entered");
     let mut commands = commands.write().await;
-    while let Some(command) = commands.next().await {
+    while let Some(command) = commands.recv().await {
         let services = services.clone();
         match command {
             Command::Shutdown => {
@@ -399,15 +396,16 @@ impl FSM {
         resolved_services: &Services,
         af: impl AddressFamily,
     ) -> io::Result<(Self, mpsc::Sender<Command>)> {
-        let std_socket = af.bind()?;
-        let socket = UdpSocket::from_std(std_socket).unwrap();
-        let (recv_half, send_half) = socket.split();
+
+	let std_socket = af.bind()?;	
+        let socket = Arc::new(UdpSocket::from_std(std_socket)?);
+        let (recv_half, send_half) = (socket.clone(),socket.clone());
         let (tx, rx) = mpsc::channel(10);
 
         let fsm = FSM {
             state: Arc::new(RwLock::new(FSMState::Active)),
-            recv_half: Arc::new(RwLock::new(recv_half)),
-            send_half: Arc::new(RwLock::new(send_half)),
+            recv_half: recv_half,
+            send_half: send_half,
             mdns_group: af.mdns_group(),
             af_v6: af.v6(),
             advertised_services: advertised_services.clone(),
